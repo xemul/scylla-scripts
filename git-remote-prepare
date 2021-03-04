@@ -1,0 +1,56 @@
+#!/bin/bash
+
+USER="xemul"
+SRCDIR="/home/${USER}/src"
+
+PROD=$(basename $(pwd))
+echo "Pulling $PROD"
+
+IP=${1}
+BRANCH=${2}
+
+AUX=(${BRANCH//-/ })
+VER=${AUX[-1]}
+GFPVER=""
+
+if [ -z "${VER//[0-9]}" ]; then
+	echo "Version ${VER}"
+	GFPVER="-v${VER}"
+else
+	echo "Initial version"
+fi
+
+if git branch | fgrep -q ${BRANCH}; then
+	echo "Branch ${BRANCH} exists"
+	exit 1
+fi
+
+DIRNAME="patches-${BRANCH}"
+if [ -d ${DIRNAME} ]; then
+	echo "Directory ${DIRNAME} exists"
+	exit 1
+fi
+
+set -e
+
+# Fetch the branch
+URL="ssh://${USER}@${IP}:${SRCDIR}/${PROD}"
+echo "Will fetch ${URL} ${BRANCH}"
+git fetch ${URL} ${BRANCH}:${BRANCH}
+
+mkdir "${DIRNAME}"
+
+git checkout ${BRANCH}
+NR=$(git log master.. --pretty=short | egrep '^commit' | wc -l)
+echo "Got ${NR} patches"
+
+GFPOPT=""
+if [ "${NR}" -ne "1" ]; then
+	echo "Pushing to github"
+	# Push on github
+	git push -f ${USER} ${BRANCH}:${BRANCH}
+	GFPOPT="--cover-letter"
+fi
+
+# Make patches
+git format-patch ${GFPVER} ${GFPOPT} -o ${DIRNAME} master..
