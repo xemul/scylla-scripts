@@ -1,0 +1,17 @@
+- name: load-1
+  shards: all
+  type: LD1
+  data_size: 4GB
+  shard_info:
+    parallelism: PRL1
+    reqsize: 4kB
+    shares: 100
+
+- name: load-2
+  shards: all
+  type: LD2
+  data_size: 4GB
+  shard_info:
+    parallelism: PRL2
+    reqsize: 4kB
+    shares: 100
