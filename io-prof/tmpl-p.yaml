@@ -1,0 +1,8 @@
+- name: load
+  shards: all
+  type: LD
+  data_size: 32GB
+  shard_info:
+    parallelism: PRL
+    reqsize: 128kB
+    shares: 100
