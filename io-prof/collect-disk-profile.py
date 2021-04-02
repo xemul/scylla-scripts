@@ -3,14 +3,25 @@
 import yaml
 import time
 import subprocess
+import argparse
 
 latency_goal = 1.0 # msec
-data_size = '32MB'
-duration_sec = 1
-pause_sec = 1
+data_size = '64GB'
+duration_sec = 120
+pause_sec = 16
 io_tester = '../../seastar/build/dev/apps/io_tester/io_tester'
-storage = '/home/xfs/io_tester'
 
+parser = argparse.ArgumentParser(description='Disk profile collector')
+parser.add_argument('-w', dest='wloads', action='append', choices=['throughput', 'iops'], help='Workloads to run')
+parser.add_argument('-p', dest='prl', choices=['dense', 'sparse'], help='Parallelizm handling')
+parser.add_argument('-s', dest='storage', default='/mnt', help='Storage to work on (default /mnt)')
+parser.add_argument('-f', dest='fast', action='store_true', help='Fast (and inaccurate) measurement')
+args = parser.parse_args()
+
+if args.fast:
+    data_size = '32MB'
+    duration_sec = 1
+    pause_sec = 0.1
 
 class table:
     def __init__(self, name, default = 0.0):
@@ -78,7 +89,7 @@ class measurement:
 
     def run(self):
         yaml.dump(self._config, open('conf.yaml', 'w'))
-        self._proc = subprocess.Popen([io_tester, '--storage', storage, '-c1', '--conf', 'conf.yaml', '--duration', self._duration], stdout=subprocess.PIPE)
+        self._proc = subprocess.Popen([io_tester, '--storage', args.storage, '-c1', '--conf', 'conf.yaml', '--duration', self._duration], stdout=subprocess.PIPE)
         res = self._proc.communicate()
         time.sleep(self._pause)
         res = res[0].split(b'---\n')[1]
@@ -86,23 +97,68 @@ class measurement:
 
 
 class profile:
-    def __init__(self, typ, rq_size):
+    class dense:
+        def __init__(self):
+            pass
+
+        def add_workloads(self, m, typ, rqsz, prl):
+            self._name = m.add_workload(typ, rqsz, prl)
+
+        def get_iops(self, res):
+            return float(res[self._name]['IOPS'])
+
+        def name(self):
+            return 'd' + self._name
+
+    class sparse:
+        def __init__(self):
+            self._names = []
+            self._max_workloads = 4
+
+        def add_workloads(self, m, typ, rqsz, prl):
+            self._typ = typ
+            self._prl = prl
+
+            if prl <= self._max_workloads:
+                for i in range(0, prl):
+                    nm = m.add_workload(typ, rqsz, 1)
+                    self._names.append(nm)
+            else:
+                com = int(prl / self._max_workloads)
+                rem = prl % self._max_workloads
+                for i in range(0, self._max_workloads):
+                    nm = m.add_workload(typ, rqsz, com + (1 if i < rem else 0))
+                    self._names.append(nm)
+
+        def get_iops(self, res):
+            return sum([ float(res[n]['IOPS']) for n in self._names ])
+
+        def name(self):
+            return f's{len(self._names)}_{self._typ}_{self._prl}'
+
+    def __init__(self, typ, rq_size, prl):
         self._typ = typ
         self._req_size = rq_size
         self._delays = table('delays')
         self._reads = table('read iops')
         self._writes = table('write iops')
         self._threshold = latency_goal
+        self._prl = None
+        if not prl or prl == 'dense':
+            self._prl = self.dense
+        if prl == 'sparse':
+            self._prl = self.sparse
 
-    def _do_pure(self, direction):
+    def _do_pure(self, direction, wtype):
         prl = 1
         while True:
             m = measurement()
-            name = m.add_workload(self._typ + direction, self._req_size, prl)
+            wt = wtype()
+            wt.add_workloads(m, self._typ + direction, self._req_size, prl)
             res = m.run()
-            iops = float(res[name]['IOPS'])
+            iops = wt.get_iops(res)
             delay = prl / iops * 1000
-            print(f'{name} {iops} {delay} ms')
+            print(f'{wt.name()} {iops} {delay} ms')
             if direction == 'read':
                 self._delays.add(prl, 0, delay)
                 self._reads.add(prl, 0, iops)
@@ -113,18 +169,20 @@ class profile:
             if delay > self._threshold or prl > 1024:
                 break
 
-    def _do_mixed(self):
+    def _do_mixed(self, wtype):
         rprl = 1
         wprl = 1
         while True:
             m = measurement()
-            rname = m.add_workload(self._typ + 'read', self._req_size, rprl)
-            wname = m.add_workload(self._typ + 'write', self._req_size, wprl)
+            reads = wtype()
+            reads.add_workloads(m, self._typ + 'read', self._req_size, rprl)
+            writes = wtype()
+            writes.add_workloads(m, self._typ + 'write', self._req_size, wprl)
             res = m.run()
-            riops = float(res[rname]['IOPS'])
-            wiops = float(res[wname]['IOPS'])
+            riops = reads.get_iops(res)
+            wiops = writes.get_iops(res)
             delay = (rprl / riops + wprl / wiops) * 1000
-            print(f'{rname} {riops} {wname} {wiops} {delay} ms')
+            print(f'{reads.name()} {riops} {writes.name()} {wiops} {delay} ms')
             self._delays.add(rprl, wprl, delay)
             self._reads.add(rprl, wprl, riops)
             self._writes.add(rprl, wprl, wiops)
@@ -138,9 +196,9 @@ class profile:
                 wprl = 1
 
     def collect(self):
-        self._do_pure('read')
-        self._do_pure('write')
-        self._do_mixed()
+        self._do_pure('read', self._prl)
+        self._do_pure('write', self._prl)
+        self._do_mixed(self._prl)
 
     def show(self, full = True):
         print(f"========[ {self._typ}:{self._req_size} ]========")
@@ -149,11 +207,14 @@ class profile:
             self._reads.show()
             self._writes.show()
 
+wloads = []
 
-p_throughput = profile('seq', '128kB')
-p_throughput.collect()
-p_iops = profile('rand', '4kB')
-p_iops.collect()
+if 'throughput' in args.wloads:
+    wloads.append(profile('seq', '128kB', args.prl))
+if 'iops' in args.wloads:
+    wloads.append(profile('rand', '4kB', args.prl))
 
-p_throughput.show()
-p_iops.show()
+for wl in wloads:
+    wl.collect()
+for wl in wloads:
+    wl.show()
