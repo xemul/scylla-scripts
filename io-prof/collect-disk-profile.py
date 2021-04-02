@@ -5,23 +5,21 @@ import time
 import subprocess
 import argparse
 
-latency_goal = 1.0 # msec
-data_size = '64GB'
-duration_sec = 120
-pause_sec = 16
-io_tester = '../../seastar/build/dev/apps/io_tester/io_tester'
-
 parser = argparse.ArgumentParser(description='Disk profile collector')
-parser.add_argument('-w', dest='wloads', action='append', choices=['throughput', 'iops'], help='Workloads to run')
-parser.add_argument('-p', dest='prl', choices=['dense', 'sparse'], help='Parallelizm handling')
+parser.add_argument('-w', dest='wloads', action='append', help='Workloads to run (throughput or iops or $type:$request_size_in_kB)')
+parser.add_argument('-p', dest='prl', choices=['dense', 'sparse'], default='dense', help='Parallelizm handling (default dense)')
 parser.add_argument('-s', dest='storage', default='/mnt', help='Storage to work on (default /mnt)')
-parser.add_argument('-f', dest='fast', action='store_true', help='Fast (and inaccurate) measurement')
+parser.add_argument('-l', dest='latency_goal', type=float, default=1.0, help='Latency goal (ms, default 1.0)')
+parser.add_argument('-S', dest='data_size', default='64GB', help='Data size (default 64GB)')
+parser.add_argument('-D', dest='duration', default=120, help='Duration of a single measurement (sec, default 120)')
+parser.add_argument('-P', dest='pause', default=16.0, type=float, help='Pause between measuremenets (sec, default 16)')
+parser.add_argument('-F', dest='fast', action='store_true', help='Fast (and inaccurate) measurement (-d 32MB -D 1 -P 0.1)')
 args = parser.parse_args()
 
 if args.fast:
-    data_size = '32MB'
-    duration_sec = 1
-    pause_sec = 0.1
+    args.data_size = '32MB'
+    args.duration = 1
+    args.pause = 0.1
 
 class table:
     def __init__(self, name, default = 0.0):
@@ -37,12 +35,12 @@ class table:
         self._ws.add(wprl)
 
     def show(self):
-        print(f"------[ {self._name} ]------")
+        print(f"------------")
         rs = list(self._rs)
         rs.sort()
         ws = list(self._ws)
         ws.sort()
-        print('-- ' + ' '.join([f'w{w}' for w in ws ])) # header
+        print(self._name + ' ' + ' '.join([f'w{w}' for w in ws ])) # header
         for rprl in rs:
             ln = f'r{rprl}'
             skip = ''
@@ -67,11 +65,12 @@ class table:
 
 
 class measurement:
-    def __init__(self):
+    def __init__(self, data_size, duration_sec, pause_sec):
         self._config = []
         self._data_size = data_size
-        self._duration = f'{duration_sec}'
+        self._duration = duration_sec
         self._pause = pause_sec
+        self._io_tester = '../../seastar/build/dev/apps/io_tester/io_tester'
 
     def add_workload(self, typ, rqsz, prl):
         self._config.append({
@@ -89,7 +88,7 @@ class measurement:
 
     def run(self):
         yaml.dump(self._config, open('conf.yaml', 'w'))
-        self._proc = subprocess.Popen([io_tester, '--storage', args.storage, '-c1', '--conf', 'conf.yaml', '--duration', self._duration], stdout=subprocess.PIPE)
+        self._proc = subprocess.Popen([self._io_tester, '--storage', args.storage, '-c1', '--conf', 'conf.yaml', '--duration', f'{self._duration}'], stdout=subprocess.PIPE)
         res = self._proc.communicate()
         time.sleep(self._pause)
         res = res[0].split(b'---\n')[1]
@@ -136,23 +135,27 @@ class profile:
         def name(self):
             return f's{len(self._names)}_{self._typ}_{self._prl}'
 
-    def __init__(self, typ, rq_size, prl):
+    def __init__(self, typ, rq_size, args):
         self._typ = typ
         self._req_size = rq_size
-        self._delays = table('delays')
-        self._reads = table('read iops')
-        self._writes = table('write iops')
-        self._threshold = latency_goal
+        self._delays = table(f'delays:{typ}:{rq_size}:{args.prl}')
+        self._reads = table('read_iops')
+        self._writes = table('write_iops')
+        self._threshold = args.latency_goal
         self._prl = None
-        if not prl or prl == 'dense':
+        if args.prl == 'dense':
             self._prl = self.dense
-        if prl == 'sparse':
+        if args.prl == 'sparse':
             self._prl = self.sparse
+
+        self._data_size = args.data_size
+        self._duration = args.duration
+        self._pause = args.pause
 
     def _do_pure(self, direction, wtype):
         prl = 1
         while True:
-            m = measurement()
+            m = measurement(self._data_size, self._duration, self._pause)
             wt = wtype()
             wt.add_workloads(m, self._typ + direction, self._req_size, prl)
             res = m.run()
@@ -173,7 +176,7 @@ class profile:
         rprl = 1
         wprl = 1
         while True:
-            m = measurement()
+            m = measurement(self._data_size, self._duration, self._pause)
             reads = wtype()
             reads.add_workloads(m, self._typ + 'read', self._req_size, rprl)
             writes = wtype()
@@ -207,14 +210,17 @@ class profile:
             self._reads.show()
             self._writes.show()
 
-wloads = []
+profs = []
+for w in args.wloads:
+    if w == 'throughput':
+        profs.append(profile('seq', '128kB', args))
+    elif w == 'iops':
+        profs.append(profile('rand', '4kB', args))
+    else:
+        wp = w.split(':')
+        profs.append(profile(wp[0], wp[1]+'kB', args))
 
-if 'throughput' in args.wloads:
-    wloads.append(profile('seq', '128kB', args.prl))
-if 'iops' in args.wloads:
-    wloads.append(profile('rand', '4kB', args.prl))
-
-for wl in wloads:
+for wl in profs:
     wl.collect()
-for wl in wloads:
+for wl in profs:
     wl.show()
