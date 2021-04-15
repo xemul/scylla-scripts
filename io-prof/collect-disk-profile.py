@@ -13,7 +13,8 @@ parser.add_argument('-l', dest='latency_goal', type=float, default=1.0, help='La
 parser.add_argument('-S', dest='data_size', default='64GB', help='Data size (default 64GB)')
 parser.add_argument('-D', dest='duration', default=120, help='Duration of a single measurement (sec, default 120)')
 parser.add_argument('-P', dest='pause', default=16.0, type=float, help='Pause between measuremenets (sec, default 16)')
-parser.add_argument('-F', dest='fast', action='store_true', help='Fast (and inaccurate) measurement (-d 32MB -D 1 -P 0.1)')
+parser.add_argument('-fast', action='store_true', help='Fast (and inaccurate) measurement (-d 32MB -D 1 -P 0.1)')
+parser.add_argument('-full', action='store_true', help='Show full stats at the end')
 args = parser.parse_args()
 
 if args.fast:
@@ -65,16 +66,16 @@ class table:
 
 
 class measurement:
-    def __init__(self, data_size, duration_sec, pause_sec):
+    def __init__(self, args):
         self._config = []
-        self._data_size = data_size
-        self._duration = duration_sec
-        self._pause = pause_sec
+        self._data_size = args.data_size
+        self._duration = args.duration
+        self._pause = args.pause
         self._io_tester = '../../seastar/build/dev/apps/io_tester/io_tester'
 
     def add_workload(self, typ, rqsz, prl):
         self._config.append({
-            'name': f'{len(self._config)}_{typ}_{prl}',
+            'name': f'workload_{len(self._config)}',
             'shards': 'all',
             'data_size': self._data_size,
             'type': typ,
@@ -88,7 +89,7 @@ class measurement:
 
     def run(self):
         yaml.dump(self._config, open('conf.yaml', 'w'))
-        self._proc = subprocess.Popen([self._io_tester, '--storage', args.storage, '-c1', '--conf', 'conf.yaml', '--duration', f'{self._duration}'], stdout=subprocess.PIPE)
+        self._proc = subprocess.Popen([self._io_tester, '--storage', args.storage, '-c1', '--conf', 'conf.yaml', '--duration', f'{self._duration}', '--keep-files', 'true'], stdout=subprocess.PIPE)
         res = self._proc.communicate()
         time.sleep(self._pause)
         res = res[0].split(b'---\n')[1]
@@ -135,10 +136,11 @@ class profile:
         def name(self):
             return f's{len(self._names)}_{self._typ}_{self._prl}'
 
-    def __init__(self, typ, rq_size, args):
+    def __init__(self, typ, rq_size_r, rq_size_w, args):
         self._typ = typ
-        self._req_size = rq_size
-        self._delays = table(f'delays:{typ}:{rq_size}:{args.prl}')
+        self._req_size_r = rq_size_r
+        self._req_size_w = rq_size_w
+        self._delays = table(f'delays:{typ}:{rq_size_r}:{rq_size_w}:{args.prl}')
         self._reads = table('read_iops')
         self._writes = table('write_iops')
         self._threshold = args.latency_goal
@@ -148,16 +150,18 @@ class profile:
         if args.prl == 'sparse':
             self._prl = self.sparse
 
-        self._data_size = args.data_size
-        self._duration = args.duration
-        self._pause = args.pause
+        self._args = args
 
     def _do_pure(self, direction, wtype):
         prl = 1
+        if direction == 'read':
+            req_size = self._req_size_r
+        if direction == 'write':
+            req_size = self._req_size_w
         while True:
-            m = measurement(self._data_size, self._duration, self._pause)
+            m = measurement(self._args)
             wt = wtype()
-            wt.add_workloads(m, self._typ + direction, self._req_size, prl)
+            wt.add_workloads(m, self._typ + direction, req_size, prl)
             res = m.run()
             iops = wt.get_iops(res)
             delay = prl / iops * 1000
@@ -176,11 +180,11 @@ class profile:
         rprl = 1
         wprl = 1
         while True:
-            m = measurement(self._data_size, self._duration, self._pause)
+            m = measurement(self._args)
             reads = wtype()
-            reads.add_workloads(m, self._typ + 'read', self._req_size, rprl)
+            reads.add_workloads(m, self._typ + 'read', self._req_size_r, rprl)
             writes = wtype()
-            writes.add_workloads(m, self._typ + 'write', self._req_size, wprl)
+            writes.add_workloads(m, self._typ + 'write', self._req_size_w, wprl)
             res = m.run()
             riops = reads.get_iops(res)
             wiops = writes.get_iops(res)
@@ -203,22 +207,91 @@ class profile:
         self._do_pure('write', self._prl)
         self._do_mixed(self._prl)
 
-    def show(self, full = True):
-        print(f"========[ {self._typ}:{self._req_size} ]========")
+    def show(self):
+        print(f"========[ {self._typ}:{self._req_size_r}:{self._req_size_w} ]========")
         self._delays.show()
-        if full:
+        if self._args.full:
             self._reads.show()
             self._writes.show()
 
+
+class sat_row:
+    def __init__(self, rqsz, tp):
+        self._target = tp
+        self._row = [(rqsz, tp)]
+
+    def _deviation(self, val):
+        if val > self._target:
+            return 0.0
+        else:
+            return (self._target - val) / self._target
+
+    def add(self, rqsz, tp):
+        self._row.append((rqsz, tp))
+        dev = self._deviation(tp)
+        return dev > 0.04
+
+    def _reqsz(self, sz):
+        if sz < 1024:
+            return f'{sz}'
+        sz = int(sz / 1024)
+        if sz < 1024:
+            return f'{sz}k'
+        sz = int(sz / 1024)
+        return f'{sz}M'
+
+    def format(self, typ):
+        fmt = f'{typ}: {self._reqsz(self._row[-2][0])}\n'
+        fmt += '\n'.join(f'{self._reqsz(x[0])} {x[1]} {int(self._deviation(x[1])*100)}' for x in self._row)
+        return fmt
+
+class saturation:
+    def __init__(self, args):
+        self._args = args
+
+    def _measure_one(self, typ, reqsz):
+        while True:
+            m = measurement(self._args)
+            nm = m.add_workload('seq' + typ, reqsz, 1)
+            res = m.run()
+            return float(res[nm]['throughput'])
+
+    def _measure(self, typ, init_sz):
+        tp_tgt = self._measure_one(typ, init_sz)
+        stats = sat_row(init_sz, tp_tgt)
+
+        sz = int(init_sz / 2)
+        while sz >= 1024:
+            tp = self._measure_one(typ, sz)
+            if stats.add(sz, tp):
+                break
+
+            sz = int(sz / 2)
+
+        return stats
+
+    def collect(self):
+        self._reads = self._measure('read', 32 * 1024 * 1024)
+        self._writes = self._measure('write', 2 * 1024 * 1024)
+
+    def show(self):
+        print(self._reads.format('read'))
+        print(self._writes.format('write'))
+
 profs = []
 for w in args.wloads:
-    if w == 'throughput':
+    if w == 'saturate':
+        profs.append(saturation(args))
+    elif w == 'throughput':
         profs.append(profile('seq', '128kB', args))
     elif w == 'iops':
         profs.append(profile('rand', '4kB', args))
     else:
         wp = w.split(':')
-        profs.append(profile(wp[0], wp[1]+'kB', args))
+        if len(wp) == 2:
+            profs.append(profile(wp[0], wp[1]+'kB', wp[1]+'kB', args))
+        if len(wp) == 3:
+            profs.append(profile(wp[0], wp[1]+'kB', wp[2]+'kB', args))
 
 for wl in profs:
     wl.collect()
