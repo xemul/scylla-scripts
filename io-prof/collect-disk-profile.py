@@ -140,7 +140,8 @@ class profile:
         self._typ = typ
         self._req_size_r = rq_size_r
         self._req_size_w = rq_size_w
-        self._delays = table(f'delays:{typ}:{rq_size_r}:{rq_size_w}:{args.prl}')
+        self._rdelays = table(f'read_delays:{typ}:{rq_size_r}:{rq_size_w}:{args.prl}')
+        self._wdelays = table(f'write_delays:{typ}:{rq_size_r}:{rq_size_w}:{args.prl}')
         self._reads = table('read_iops')
         self._writes = table('write_iops')
         self._threshold = args.latency_goal
@@ -167,10 +168,10 @@ class profile:
             delay = prl / iops * 1000
             print(f'{wt.name()} {iops} {delay} ms')
             if direction == 'read':
-                self._delays.add(prl, 0, delay)
+                self._rdelays.add(prl, 0, delay)
                 self._reads.add(prl, 0, iops)
             if direction == 'write':
-                self._delays.add(0, prl, delay)
+                self._wdelays.add(0, prl, delay)
                 self._writes.add(0, prl, iops)
             prl *= 2
             if delay > self._threshold or prl > 1024:
@@ -187,15 +188,18 @@ class profile:
             writes.add_workloads(m, self._typ + 'write', self._req_size_w, wprl)
             res = m.run()
             riops = reads.get_iops(res)
+            rdelay = rprl / riops * 1000
             wiops = writes.get_iops(res)
+            wdelay = wprl / wiops * 1000
             delay = (rprl / riops + wprl / wiops) * 1000
-            print(f'{reads.name()} {riops} {writes.name()} {wiops} {delay} ms')
-            self._delays.add(rprl, wprl, delay)
+            print(f'{reads.name()} {rprl} {riops} {rdelay} ms {writes.name()} {wprl} {wiops} {wdelay} ms -> {delay} ms')
+            self._rdelays.add(rprl, wprl, rdelay)
             self._reads.add(rprl, wprl, riops)
+            self._wdelays.add(rprl, wprl, wdelay)
             self._writes.add(rprl, wprl, wiops)
 
             wprl *= 2
-            if delay > self._threshold or wprl > 1024:
+            if rdelay > self._threshold or wdelay > self._threshold or wprl > 1024:
                 if wprl == 2 or rprl > 1024:
                     break
 
@@ -203,13 +207,14 @@ class profile:
                 wprl = 1
 
     def collect(self):
-        self._do_pure('read', self._prl)
-        self._do_pure('write', self._prl)
+        #self._do_pure('read', self._prl)
+        #self._do_pure('write', self._prl)
         self._do_mixed(self._prl)
 
     def show(self):
         print(f"========[ {self._typ}:{self._req_size_r}:{self._req_size_w} ]========")
-        self._delays.show()
+        self._rdelays.show()
+        self._wdelays.show()
         if self._args.full:
             self._reads.show()
             self._writes.show()
@@ -283,9 +288,9 @@ for w in args.wloads:
     if w == 'saturate':
         profs.append(saturation(args))
     elif w == 'throughput':
-        profs.append(profile('seq', '128kB', args))
+        profs.append(profile('seq', '128kB', '128kB', args))
     elif w == 'iops':
-        profs.append(profile('rand', '4kB', args))
+        profs.append(profile('rand', '4kB', '4kB', args))
     else:
         wp = w.split(':')
         if len(wp) == 2:
