@@ -32,7 +32,7 @@ for CMT in ${COMMITS}; do
     fi
 done
 
-echo "======== Final Grand Check ========"
+echo "======== Final Check ========"
 git checkout -f ${CURRENT}
 if ! do_build ; then
     BFAILS="${BFAILS} HEAD"
