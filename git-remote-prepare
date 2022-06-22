@@ -2,6 +2,7 @@
 
 USER="xemul"
 SRCDIR="/home/${USER}/src"
+BASE_BRANCH="master"
 
 PROD=$(basename $(pwd))
 echo "Pulling $PROD"
@@ -9,26 +10,44 @@ echo "Pulling $PROD"
 IP=${1}
 BRANCH=${2}
 
+if [ "${3}" == "--rfc" ]; then
+	echo "Adding --rfc option"
+	GFPEXTRA='--rfc'
+fi
+
 AUX=(${BRANCH//-/ })
 VER=${AUX[-1]}
 GFPVER=""
+PREVVER=""
 
 if [ -z "${VER//[0-9]}" ]; then
 	echo "Version ${VER}"
 	GFPVER="-v${VER}"
+	PREVVER=$((VER-1))
+	echo "Previous version ${PREVVER}"
 else
 	echo "Initial version"
 fi
 
 if git branch | fgrep -q ${BRANCH}; then
-	echo "Branch ${BRANCH} exists"
-	exit 1
+	if [ ${BRANCH} == "br-x" -o ${BRANCH} == "br-x-${VER}" ]; then
+		echo "Dropping temporary branch"
+		git branch -D ${BRANCH}
+	else
+		echo "Branch ${BRANCH} exists"
+		exit 1
+	fi
 fi
 
 DIRNAME="patches-${BRANCH}"
 if [ -d ${DIRNAME} ]; then
-	echo "Directory ${DIRNAME} exists"
-	exit 1
+	if [ ${BRANCH} == "br-x" -o ${BRANCH} == "br-x-${VER}" ]; then
+		echo "Dropping temporary patches dir"
+		rm -rf ${DIRNAME}
+	else
+		echo "Directory ${DIRNAME} exists"
+		exit 1
+	fi
 fi
 
 set -e
@@ -41,11 +60,14 @@ git fetch ${URL} ${BRANCH}:${BRANCH}
 mkdir "${DIRNAME}"
 
 git checkout ${BRANCH}
-NR=$(git log master.. --pretty=short | egrep '^commit' | wc -l)
+NR=$(git log ${BASE_BRANCH}.. --pretty=short | egrep '^commit' | wc -l)
 echo "Got ${NR} patches"
 
 GFPOPT=""
-if [ "${NR}" -ne "1" ]; then
+if [ "${BRANCH}" == "br-x" ]; then
+	echo "Individual patches"
+	GFPOPT="--no-thread --no-numbered"
+elif [ "${NR}" -ne "1" ]; then
 	echo "Pushing to github"
 	# Push on github
 	git push -f ${USER} ${BRANCH}:${BRANCH}
@@ -53,4 +75,29 @@ if [ "${NR}" -ne "1" ]; then
 fi
 
 # Make patches
-git format-patch ${GFPVER} ${GFPOPT} -o ${DIRNAME} master..
+git format-patch ${GFPVER} ${GFPOPT} ${GFPEXTRA} -o ${DIRNAME} ${BASE_BRANCH}..
+
+if [ "${NR}" -ne "1" ]; then
+	COVER=$(ls ${DIRNAME}/*0000-cover-letter.patch)
+	sed -e '/BLURB HERE/abranch: https://github.com/xemul/'${PROD//-2/}'/tree/'${BRANCH} -i ${COVER}
+	/bin/true
+
+	if [ "x${PREVVER}" != "x" ]; then
+		if [ "${PREVVER}" == "1" ]; then
+			PREVDIR=$(echo $DIRNAME | sed -e "s/-${VER}$//")
+		else
+			PREVDIR=$(echo $DIRNAME | sed -e "s/-${VER}$/-${PREVVER}/")
+		fi
+
+		echo "$PREVDIR"
+		if [ -d "${PREVDIR}" ]; then
+			echo "Copying cover letter from ${PREVDIR}"
+			PREVCOVER=$(ls ${PREVDIR}/*0000-cover-letter.patch)
+			cat ${PREVCOVER} >> ${COVER}
+		else
+			echo "No previous cover letter"
+		fi
+	fi
+fi
+
+echo "Saved patch(es) in ${DIRNAME}"
