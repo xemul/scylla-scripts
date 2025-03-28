@@ -1,5 +1,6 @@
 #!/bin/env python3
 
+import os
 import argparse
 import subprocess
 import colorama
@@ -13,23 +14,43 @@ parser.add_argument('command', nargs=argparse.REMAINDER)
 args = parser.parse_args()
 
 class remote:
+    def _user_and_host(self):
+        return f'{self._user}@{self._host}' if self._user is not None else self._host
+
+    def _execute_cmd(self, args):
+        cmd = ['ssh']
+        if self._identity is not None:
+            cmd += ['-i', self._identity]
+        cmd += [ self._user_and_host() ]
+        cmd += args
+        return cmd
+
+    def _copy_cmd(self, args):
+        cmd = ['scp']
+        if self._identity is not None:
+            cmd += ['-i', self._identity]
+        cmd += [args[0]]
+        args.append(os.path.basename(args[0]))
+        cmd += [ f'{self._user_and_host()}:{args[1]}' ]
+        return cmd
+
+    def _format_command(self):
+        def fmt(a):
+            return a if not (' ' in a or '\t' in a) else f'"{a}"'
+        return ' '.join([ fmt(s) for s in self._command ])
+
     def __init__(self, user, host, args):
         self._host = host
         self._user = user
         self._identity = args.identity
-        self._command = args.command
+        if args.command[0] == '--copy':
+            self._command = self._copy_cmd(args.command[1:])
+        else:
+            self._command = self._execute_cmd(args.command)
 
     def start(self):
-        cmd = ['ssh']
-        if self._identity is not None:
-            cmd += ['-i', self._identity]
-        if self._user is not None:
-            cmd += [f'{self._user}@{self._host}']
-        else:
-            cmd += [self._host]
-        cmd += self._command
-        self._sub = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        print(f'Running {cmd}')
+        self._sub = subprocess.Popen(self._command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        print(f'Running {self._format_command()}')
 
     def join(self):
         out, err = self._sub.communicate()
@@ -57,9 +78,7 @@ for h in hosts.split(':'):
 
 for r in remotes:
     r.start()
-
 for r in remotes:
     r.join()
-
 for r in remotes:
     r.report()
