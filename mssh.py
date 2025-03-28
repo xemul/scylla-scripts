@@ -70,7 +70,7 @@ class remote:
 
 remotes = []
 user_and_hosts = args.hosts.split('@', 2)
-user = user_and_hosts[0] if len(user_and_hosts) == 2 else ''
+user = user_and_hosts[0] if len(user_and_hosts) == 2 else None
 hosts = user_and_hosts[-1]
 
 for h in hosts.split(':'):
